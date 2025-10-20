@@ -48,7 +48,7 @@ struct CPU
   void Reset(Mem &memory) 
   {
     PC = 0xFFFC;
-    SP = 0x0100;
+    SP = 0x01FF; // 6502 stack at 0x0100-0x01FF, start at top
     C = Z = I = D = B = V = N = 0;
     A = X = Y = 0;
     memory.Initialize();
@@ -73,6 +73,8 @@ struct CPU
     // BRK/JSR
     BRK = 0x00,
     JSR_ABS = 0x20,
+    JMP_ABS = 0x4C,
+    JMP_IND = 0x6C,
 
     // ADC (Add with Carry)
     ADC_IM = 0x69,
@@ -94,7 +96,10 @@ struct CPU
     AND_INDX = 0x21,
     AND_INDY = 0x31,
 
-    // ASL
+    // BIT
+    BIT_ZP = 0x24,
+ 
+     // ASL
     ASL_A = 0x0A,
     ASL_ZP = 0x06,
     ASL_ZPX = 0x16,
@@ -275,14 +280,16 @@ struct CPU
     };
 
     auto pushByte = [&](Byte v) {
-      memory[SP] = v;
-      SP--;
+      Word addr = (Word)(0x0100 | (SP & 0x00FF));
+      memory[addr] = v;
+      SP = (Word)((SP & 0xFF00) | ((SP - 1) & 0x00FF));
       Cycles--;
     };
 
     auto popByte = [&]() -> Byte {
-      SP++;
-      Byte v = memory[SP];
+      SP = (Word)((SP & 0xFF00) | ((SP + 1) & 0x00FF));
+      Word addr = (Word)(0x0100 | (SP & 0x00FF));
+      Byte v = memory[addr];
       Cycles--;
       return v;
     };
@@ -310,11 +317,11 @@ struct CPU
       N = (p & 0x80) != 0;
     };
 
-    while (Cycles > 0) 
+    while (Cycles > 0)
     {
       Byte Ins = FetchByte(Cycles, memory);
       Opcode Op = static_cast<Opcode>(Ins);
-      switch (Op) 
+      switch (Op)
       {
       case Opcode::JSR_ABS: 
       {
@@ -322,11 +329,10 @@ struct CPU
         Byte HighByte = FetchByte(Cycles, memory);
         Word AbsoluteAddr = (Word)LowByte | ((Word)HighByte << 8);
 
-        memory[SP - 1] = (PC + 2) >> 8;
-        memory[SP - 2] = (PC + 2) & 0xFF;
-        SP -= 2;
+        Word ret = (Word)(PC - 1); // push return-1 high then low on 6502
+        pushByte((Byte)((ret >> 8) & 0xFF));
+        pushByte((Byte)(ret & 0xFF));
         PC = AbsoluteAddr;
-        Cycles -= 2;
       } break;
       case Opcode::LDA_IM: 
       {
@@ -356,7 +362,7 @@ struct CPU
         A = (SByte)ReadByte(Cycles, AbsoluteAddr, memory);
         LDASetStatus();
       } break;
-      case Opcode::LDA_ABS_X: 
+      case Opcode::LDA_ABS_X:
       {
         Byte LowByte = FetchByte(Cycles, memory);
         Byte HighByte = FetchByte(Cycles, memory);
@@ -1043,7 +1049,7 @@ struct CPU
       // Stack ops
       case Opcode::PHA: { pushByte(A); } break;
       case Opcode::PHP: { pushByte(getStatus()); } break;
-      case Opcode::PLA: { A = popByte(); setZN(A); } break;
+      case Opcode::PLA: { A = popByte(); } break;
       case Opcode::PLP: { setStatus(popByte()); } break;
 
       // Transfers
@@ -1052,7 +1058,7 @@ struct CPU
       case Opcode::TXA: { A = X; setZN(A); } break;
       case Opcode::TYA: { A = Y; setZN(A); } break;
       case Opcode::TSX: { X = (Byte)(SP & 0xFF); setZN(X); } break;
-      case Opcode::TXS: { SP = (Word)((SP & 0xFF00) | X); } break;
+      case Opcode::TXS: { SP = (Word)(0x0100 | X); } break;
 
       // Shifts (only LSR implemented here)
       case Opcode::LSR_A:
@@ -1141,8 +1147,7 @@ struct CPU
           Byte low = popByte();
           Byte high = popByte();
           Word addr = (Word)low | ((Word)high << 8);
-          PC = addr;
-          Cycles -= 1; // rough extra cycle
+          PC = (Word)(addr + 1);
       } break;
       case Opcode::RTI:
       {
@@ -1160,6 +1165,45 @@ struct CPU
           memory[AbsoluteAddr] = A;
           Cycles--;
       } break;
+      // STX
+      case Opcode::STX_ZP:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          memory[addr] = X; Cycles--;
+      } break;
+      case Opcode::STX_ZPY:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte eff = (addr + Y) & 0xFF;
+          memory[eff] = X; Cycles--;
+      } break;
+      case Opcode::STX_ABS:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          memory[abs] = X; Cycles--;
+      } break;
+
+      // STY
+      case Opcode::STY_ZP:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          memory[addr] = Y; Cycles--;
+      } break;
+      case Opcode::STY_ZPY:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte eff = (addr + X) & 0xFF;
+          memory[eff] = Y; Cycles--;
+      } break;
+      case Opcode::STY_ABS:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          memory[abs] = Y; Cycles--;
+      } break;
       case Opcode::ADC_ABS: 
       {
           Byte LowByte = FetchByte(Cycles, memory);
@@ -1168,9 +1212,97 @@ struct CPU
           Byte Value = ReadByte(Cycles, AbsoluteAddr, memory);
 
           Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
-          A = Result & 0xFF;
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
           C = (Result > 0xFF);
-          LDASetStatus();
+          setZN(A);
+      } break;
+      case Opcode::ADC_ZP:
+      {
+          Byte zp = FetchByte(Cycles, memory);
+          Byte Value = ReadByte(Cycles, zp, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_IM:
+      {
+          Byte Value = FetchByte(Cycles, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_ZPX:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte eff = (addr + X) & 0xFF;
+          Byte Value = ReadByte(Cycles, eff, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_ABSX:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Word eff = abs + X;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_ABSY:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Word eff = abs + Y;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_INDX:
+      {
+          Byte zp = FetchByte(Cycles, memory);
+          Word eff = (zp + X) & 0xFF;
+          Byte low = ReadByte(Cycles, eff, memory);
+          Byte high = ReadByte(Cycles, (eff + 1) & 0xFF, memory);
+          Word abs = (Word)low | ((Word)high << 8);
+          Byte Value = ReadByte(Cycles, abs, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
+      } break;
+      case Opcode::ADC_INDY:
+      {
+          Byte zp = FetchByte(Cycles, memory);
+          Byte low = ReadByte(Cycles, zp, memory);
+          Byte high = ReadByte(Cycles, (zp + 1) & 0xFF, memory);
+          Word abs = (Word)low | ((Word)high << 8);
+          Word eff = abs + Y;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          Word Result = (Word)A + (Word)Value + (C ? 1 : 0);
+          V = (~(A ^ Value) & (A ^ (Byte)Result) & 0x80) != 0;
+          A = (Byte)Result;
+          C = (Result > 0xFF);
+          setZN(A);
       } break;
       case Opcode::SBC_ABS: 
       {
@@ -1179,18 +1311,195 @@ struct CPU
           Word AbsoluteAddr = (Word)LowByte | ((Word) HighByte << 8);
           SByte Value = ReadByte(Cycles, AbsoluteAddr, memory);
 
-          Word Result = (Word)A - (Word)(Value)- (C ? 1 : 0);
-          A = Result & 0xFF;
-          Z = (A == 0);
-          C = (Result < 0x100);
-          N = (A & 0b10000000) > 0;
-          LDASetStatus();
+          SByte A_s = (SByte)A;
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_IM:
+      {
+          SByte A_s = (SByte)A;
+          Byte Value = FetchByte(Cycles, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_ZP:
+      {
+          SByte A_s = (SByte)A;
+          Byte addr = FetchByte(Cycles, memory);
+          Byte Value = ReadByte(Cycles, addr, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_ZPX:
+      {
+          SByte A_s = (SByte)A;
+          Byte addr = FetchByte(Cycles, memory);
+          Byte eff = (addr + X) & 0xFF;
+          Byte Value = ReadByte(Cycles, eff, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_ABSX:
+      {
+          SByte A_s = (SByte)A;
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Word eff = abs + X;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_ABSY:
+      {
+          SByte A_s = (SByte)A;
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Word eff = abs + Y;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_IND_X:
+      {
+          SByte A_s = (SByte)A;
+          Byte zp = FetchByte(Cycles, memory);
+          Word eff = (zp + X) & 0xFF;
+          Byte low = ReadByte(Cycles, eff, memory);
+          Byte high = ReadByte(Cycles, (eff + 1) & 0xFF, memory);
+          Word abs = (Word)low | ((Word)high << 8);
+          Byte Value = ReadByte(Cycles, abs, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
+      } break;
+      case Opcode::SBC_IND_Y:
+      {
+          SByte A_s = (SByte)A;
+          Byte zp = FetchByte(Cycles, memory);
+          Byte low = ReadByte(Cycles, zp, memory);
+          Byte high = ReadByte(Cycles, (zp + 1) & 0xFF, memory);
+          Word abs = (Word)low | ((Word)high << 8);
+          Word eff = abs + Y;
+          if ((eff & 0xFF00) != (abs & 0xFF00)) { Cycles--; }
+          Byte Value = ReadByte(Cycles, eff, memory);
+          SByte Value_s = (SByte)Value;
+          Word Result = (Word)A_s - (Word)Value_s - (C ? 0 : 1);
+          A = (Byte)Result;
+          C = (Result & 0x8000) == 0;
+          V = (((A_s ^ Value_s) & (A_s ^ (SByte)Result)) & 0x80) != 0;
+          setZN(A);
       } break;
       case Opcode::BRK: 
       {
           return;    
       }
-      default: 
+      case Opcode::JMP_ABS:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word addr = (Word)lo | ((Word)hi << 8);
+          PC = addr;
+      } break;
+      case Opcode::JMP_IND:
+      {
+          Byte ptrLo = FetchByte(Cycles, memory);
+          Byte ptrHi = FetchByte(Cycles, memory);
+          Word ptr = (Word)ptrLo | ((Word)ptrHi << 8);
+          // 6502 page boundary wrap bug
+          Byte lo = memory[ptr];
+          Byte hi = memory[(Word)((ptr & 0xFF00) | ((ptr + 1) & 0x00FF))];
+          PC = (Word)lo | ((Word)hi << 8);
+      } break;
+      // ASL
+      case Opcode::ASL_A:
+      {
+          C = (A & 0x80) != 0;
+          A = (Byte)(A << 1);
+          setZN(A);
+      } break;
+      case Opcode::ASL_ZP:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte v = ReadByte(Cycles, addr, memory);
+          C = (v & 0x80) != 0;
+          v = (Byte)(v << 1);
+          memory[addr] = v; Cycles--;
+          setZN(v);
+      } break;
+      case Opcode::ASL_ZPX:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte eff = (addr + X) & 0xFF;
+          Byte v = ReadByte(Cycles, eff, memory);
+          C = (v & 0x80) != 0;
+          v = (Byte)(v << 1);
+          memory[eff] = v; Cycles--;
+          setZN(v);
+      } break;
+      case Opcode::ASL_ABS:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Byte v = ReadByte(Cycles, abs, memory);
+          C = (v & 0x80) != 0;
+          v = (Byte)(v << 1);
+          memory[abs] = v; Cycles--;
+          setZN(v);
+      } break;
+      case Opcode::ASL_ABSX:
+      {
+          Byte lo = FetchByte(Cycles, memory);
+          Byte hi = FetchByte(Cycles, memory);
+          Word abs = (Word)lo | ((Word)hi << 8);
+          Word eff = abs + X;
+          Byte v = ReadByte(Cycles, eff, memory);
+          C = (v & 0x80) != 0;
+          v = (Byte)(v << 1);
+          memory[eff] = v; Cycles--;
+          setZN(v);
+      } break;
+      // BIT
+      case Opcode::BIT_ZP:
+      {
+          Byte addr = FetchByte(Cycles, memory);
+          Byte value = ReadByte(Cycles, addr, memory);
+          Z = (A & value) == 0;
+          V = (value & 0x40) != 0;
+          N = (value & 0x80) != 0;
+      } break;
+      default:
       {
         printf("Instruction not handled %d\n", Ins);
         break;
